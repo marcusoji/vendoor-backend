@@ -1,7 +1,18 @@
 // src/server.js — Local development server
 // Only used locally. Vercel uses api/index.js instead.
-
 require("dotenv").config();
+
+const { PrismaClient } = require("@prisma/client");
+  const { PrismaPg } = require("@prisma/adapter-pg");
+
+    const adapter = new PrismaPg({
+        connectionString: process.env.DATABASE_URL,
+        });
+
+        const prisma = new PrismaClient({ adapter });
+
+        module.exports = prisma;
+  
 const app = require("./app");
 
 const PORT = process.env.PORT || 5000;
