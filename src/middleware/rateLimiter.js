@@ -1,32 +1,20 @@
-// src/middleware/rateLimiter.js — Express rate limiter
-
+// src/middleware/rateLimiter.js
 const rateLimit = require("express-rate-limit");
 
 const rateLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100,                  // max 100 requests per window per IP
+  windowMs: 15 * 60 * 1000,
+  max: 100,
   standardHeaders: true,
   legacyHeaders: false,
-  message: {
-    success: false,
-    message: "Too many requests. Please try again after 15 minutes.",
-  },
-  skip: (req) => {
-    // Skip rate limiting for health checks
-    return req.path === "/api/health";
-  },
+  message: { success: false, message: "Too many requests. Try again in 15 minutes." },
 });
 
-// Stricter limiter for auth endpoints
 const authRateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 20,
   standardHeaders: true,
   legacyHeaders: false,
-  message: {
-    success: false,
-    message: "Too many authentication attempts. Please try again after 15 minutes.",
-  },
+  message: { success: false, message: "Too many auth attempts. Try again in 15 minutes." },
 });
 
 module.exports = rateLimiter;

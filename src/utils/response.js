@@ -1,27 +1,7 @@
-// src/utils/response.js — Standardised API response helpers
+// src/utils/response.js
+const sendSuccess = (res, data, message = "Success", statusCode = 200) =>
+  res.status(statusCode).json({ success: true, message, data });
 
-/**
- * Send a successful JSON response.
- * @param {import('express').Response} res
- * @param {object|array} data
- * @param {string} [message]
- * @param {number} [statusCode=200]
- */
-const sendSuccess = (res, data, message = "Success", statusCode = 200) => {
-  return res.status(statusCode).json({
-    success: true,
-    message,
-    data,
-  });
-};
-
-/**
- * Send an error JSON response.
- * @param {import('express').Response} res
- * @param {string} message
- * @param {number} [statusCode=400]
- * @param {object|null} [errors=null]
- */
 const sendError = (res, message, statusCode = 400, errors = null) => {
   const body = { success: false, message };
   if (errors) body.errors = errors;

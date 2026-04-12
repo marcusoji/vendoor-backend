@@ -1,201 +1,253 @@
-// src/controllers/order.controller.js — Order management
-
-const prisma = require("../config/prisma");
+// src/controllers/order.controller.js
+const { v4: uuidv4 } = require("uuid");
+const { query, getClient } = require("../db/pool");
 const { sendSuccess, sendError } = require("../utils/response");
 
-/**
- * POST /api/orders
- * Protected (USER) — place a new order.
- * Uses a transaction to ensure price integrity and atomic creation.
- */
+// POST /api/orders — Authenticated
 const createOrder = async (req, res, next) => {
+  const client = await getClient();
   try {
     const { vendorId, deliveryAddress, notes, items } = req.body;
     const userId = req.user.id;
 
-    const vendor = await prisma.vendor.findUnique({ where: { id: vendorId, isActive: true } });
-    if (!vendor) return sendError(res, "Vendor not found or unavailable.", 404);
+    // Validate vendor exists and is active
+    const { rows: vRows } = await client.query(
+      "SELECT id, business_name, prep_time FROM vendors WHERE id = $1 AND is_active = TRUE",
+      [vendorId]
+    );
+    if (vRows.length === 0) return sendError(res, "Vendor not found or unavailable.", 404);
 
-    // Fetch all requested products in one query for server-side price validation
+    // Fetch all requested products in one query — server-side price validation
     const productIds = items.map((i) => i.productId);
-    const products = await prisma.product.findMany({
-      where: { id: { in: productIds }, vendorId, isAvailable: true },
-    });
+    const placeholders = productIds.map((_, i) => `$${i + 2}`).join(", ");
+    const { rows: products } = await client.query(
+      `SELECT id, name, price FROM products
+        WHERE id IN (${placeholders}) AND vendor_id = $1 AND is_available = TRUE`,
+      [vendorId, ...productIds]
+    );
 
     if (products.length !== productIds.length) {
-      return sendError(res, "One or more products are unavailable or do not belong to this vendor.", 400);
+      return sendError(res, "One or more products are unavailable or don't belong to this vendor.", 400);
     }
 
     const productMap = Object.fromEntries(products.map((p) => [p.id, p]));
 
-    let totalAmount = 0;
+    let subtotal = 0;
     const orderItemsData = items.map(({ productId, quantity }) => {
       const product = productMap[productId];
-      const price = product.price;
-      totalAmount += price * quantity;
-      return { productId, quantity, price };
+      subtotal += product.price * quantity;
+      return { productId, quantity, price: product.price };
     });
 
-    const deliveryFee = totalAmount >= 5000 ? 0 : 500;
-    totalAmount += deliveryFee;
+    const deliveryFee = subtotal >= 5000 ? 0 : 500;
+    const totalAmount = subtotal + deliveryFee;
+    const orderId = uuidv4();
 
-    const order = await prisma.$transaction(async (tx) => {
-      const newOrder = await tx.order.create({
-        data: {
-          userId,
-          vendorId,
-          deliveryAddress,
-          notes,
-          totalAmount,
-          deliveryFee,
-          items: {
-            create: orderItemsData,
-          },
-        },
-        include: {
-          items: {
-            include: { product: { select: { id: true, name: true, price: true } } },
-          },
-          vendor: { select: { id: true, businessName: true, prepTime: true } },
-        },
-      });
-      return newOrder;
-    });
+    // Begin transaction
+    await client.query("BEGIN");
 
-    return sendSuccess(res, { order }, "Order placed successfully.", 201);
+    await client.query(
+      `INSERT INTO orders (id, user_id, vendor_id, delivery_address, notes, total_amount, delivery_fee)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [orderId, userId, vendorId, deliveryAddress, notes || null, totalAmount, deliveryFee]
+    );
+
+    for (const item of orderItemsData) {
+      await client.query(
+        `INSERT INTO order_items (id, order_id, product_id, quantity, price)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [uuidv4(), orderId, item.productId, item.quantity, item.price]
+      );
+    }
+
+    await client.query("COMMIT");
+
+    // Fetch the complete order to return
+    const { rows: orderRows } = await query(
+      `SELECT o.*,
+              v.business_name AS vendor_name, v.prep_time AS vendor_prep_time,
+              u.full_name AS user_name, u.email AS user_email
+         FROM orders o
+         JOIN vendors v ON v.id = o.vendor_id
+         JOIN users u ON u.id = o.user_id
+        WHERE o.id = $1`,
+      [orderId]
+    );
+
+    const { rows: itemRows } = await query(
+      `SELECT oi.*, p.name AS product_name, p.image_url AS product_image
+         FROM order_items oi
+         JOIN products p ON p.id = oi.product_id
+        WHERE oi.order_id = $1`,
+      [orderId]
+    );
+
+    return sendSuccess(
+      res,
+      { order: { ...orderRows[0], items: itemRows } },
+      "Order placed successfully.",
+      201
+    );
   } catch (err) {
+    await client.query("ROLLBACK");
     next(err);
+  } finally {
+    client.release();
   }
 };
 
-/**
- * GET /api/orders
- * Protected — Users see their own orders; Admins see all.
- */
+// GET /api/orders — Authenticated
 const getAllOrders = async (req, res, next) => {
   try {
-    const page = Math.max(1, parseInt(req.query.page) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
-    const skip = (page - 1) * limit;
+    const page   = Math.max(1, parseInt(req.query.page)  || 1);
+    const limit  = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
+    const offset = (page - 1) * limit;
 
-    const where = req.user.role === "ADMIN" ? {} : { userId: req.user.id };
-    if (req.query.status) where.status = req.query.status;
+    const conditions = [];
+    const values = [];
+    let idx = 1;
 
-    const [orders, total] = await Promise.all([
-      prisma.order.findMany({
-        where,
-        skip,
-        take: limit,
-        orderBy: { createdAt: "desc" },
-        include: {
-          items: {
-            include: { product: { select: { id: true, name: true, price: true, imageUrl: true } } },
-          },
-          vendor: { select: { id: true, businessName: true, slug: true, logoUrl: true } },
-          user: { select: { id: true, fullName: true, email: true } },
-        },
-      }),
-      prisma.order.count({ where }),
-    ]);
+    if (req.user.role !== "ADMIN") {
+      conditions.push(`o.user_id = $${idx++}`);
+      values.push(req.user.id);
+    }
+    if (req.query.status) {
+      conditions.push(`o.status = $${idx++}`);
+      values.push(req.query.status);
+    }
+
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+    const { rows: orders } = await query(
+      `SELECT o.*,
+              v.business_name AS vendor_name, v.slug AS vendor_slug, v.logo_url AS vendor_logo,
+              u.full_name AS user_name, u.email AS user_email
+         FROM orders o
+         JOIN vendors v ON v.id = o.vendor_id
+         JOIN users u ON u.id = o.user_id
+         ${where}
+        ORDER BY o.created_at DESC
+        LIMIT $${idx++} OFFSET $${idx++}`,
+      [...values, limit, offset]
+    );
+
+    const { rows: countRows } = await query(
+      `SELECT COUNT(*)::int AS total FROM orders o ${where}`,
+      values
+    );
+
+    // Attach items to each order
+    const orderIds = orders.map((o) => o.id);
+    let itemsByOrder = {};
+    if (orderIds.length > 0) {
+      const placeholders = orderIds.map((_, i) => `$${i + 1}`).join(", ");
+      const { rows: allItems } = await query(
+        `SELECT oi.*, p.name AS product_name, p.image_url AS product_image
+           FROM order_items oi
+           JOIN products p ON p.id = oi.product_id
+          WHERE oi.order_id IN (${placeholders})`,
+        orderIds
+      );
+      allItems.forEach((item) => {
+        if (!itemsByOrder[item.order_id]) itemsByOrder[item.order_id] = [];
+        itemsByOrder[item.order_id].push(item);
+      });
+    }
+
+    const hydrated = orders.map((o) => ({ ...o, items: itemsByOrder[o.id] || [] }));
 
     return sendSuccess(res, {
-      orders,
-      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+      orders: hydrated,
+      pagination: { page, limit, total: countRows[0].total, totalPages: Math.ceil(countRows[0].total / limit) },
     });
   } catch (err) {
     next(err);
   }
 };
 
-/**
- * GET /api/orders/:id
- * Protected — retrieve a single order.
- */
+// GET /api/orders/:id — Authenticated
 const getOrderById = async (req, res, next) => {
   try {
     const { id } = req.params;
 
-    const order = await prisma.order.findUnique({
-      where: { id },
-      include: {
-        items: {
-          include: { product: { select: { id: true, name: true, price: true, imageUrl: true } } },
-        },
-        vendor: { select: { id: true, businessName: true, slug: true, address: true, phone: true } },
-        user: { select: { id: true, fullName: true, email: true } },
-      },
-    });
+    const { rows: oRows } = await query(
+      `SELECT o.*,
+              v.business_name AS vendor_name, v.slug AS vendor_slug,
+              v.address AS vendor_address, v.phone AS vendor_phone,
+              u.full_name AS user_name, u.email AS user_email
+         FROM orders o
+         JOIN vendors v ON v.id = o.vendor_id
+         JOIN users u ON u.id = o.user_id
+        WHERE o.id = $1`,
+      [id]
+    );
+    if (oRows.length === 0) return sendError(res, "Order not found.", 404);
 
-    if (!order) return sendError(res, "Order not found.", 404);
-
-    // Users can only view their own orders
-    if (req.user.role !== "ADMIN" && order.userId !== req.user.id) {
+    const order = oRows[0];
+    if (req.user.role !== "ADMIN" && order.user_id !== req.user.id) {
       return sendError(res, "Access denied.", 403);
     }
 
-    return sendSuccess(res, { order });
+    const { rows: items } = await query(
+      `SELECT oi.*, p.name AS product_name, p.image_url AS product_image
+         FROM order_items oi
+         JOIN products p ON p.id = oi.product_id
+        WHERE oi.order_id = $1`,
+      [id]
+    );
+
+    return sendSuccess(res, { order: { ...order, items } });
   } catch (err) {
     next(err);
   }
 };
 
-/**
- * PATCH /api/orders/:id/status
- * Protected (VENDOR, ADMIN) — update order status.
- */
+// PATCH /api/orders/:id/status — Vendor or Admin
 const updateOrderStatus = async (req, res, next) => {
   try {
     const { id } = req.params;
     const { status } = req.body;
 
-    const order = await prisma.order.findUnique({ where: { id } });
-    if (!order) return sendError(res, "Order not found.", 404);
+    const { rows: oRows } = await query("SELECT id, status FROM orders WHERE id = $1", [id]);
+    if (oRows.length === 0) return sendError(res, "Order not found.", 404);
 
-    // Prevent updating already-terminal orders
-    if (order.status === "DELIVERED" || order.status === "CANCELLED") {
-      return sendError(res, `Cannot update an order that is already ${order.status}.`, 400);
+    const current = oRows[0].status;
+    if (current === "DELIVERED" || current === "CANCELLED") {
+      return sendError(res, `Cannot update an order that is already ${current}.`, 400);
     }
 
-    const updated = await prisma.order.update({
-      where: { id },
-      data: { status },
-      include: {
-        vendor: { select: { id: true, businessName: true } },
-        user: { select: { id: true, fullName: true, email: true } },
-      },
-    });
+    const { rows } = await query(
+      "UPDATE orders SET status = $1, updated_at = NOW() WHERE id = $2 RETURNING *",
+      [status, id]
+    );
 
-    return sendSuccess(res, { order: updated }, "Order status updated.");
+    return sendSuccess(res, { order: rows[0] }, "Order status updated.");
   } catch (err) {
     next(err);
   }
 };
 
-/**
- * PATCH /api/orders/:id/cancel
- * Protected (USER) — cancel own pending order.
- */
+// PATCH /api/orders/:id/cancel — Authenticated user
 const cancelOrder = async (req, res, next) => {
   try {
     const { id } = req.params;
 
-    const order = await prisma.order.findUnique({ where: { id } });
-    if (!order) return sendError(res, "Order not found.", 404);
+    const { rows: oRows } = await query(
+      "SELECT id, user_id, status FROM orders WHERE id = $1",
+      [id]
+    );
+    if (oRows.length === 0) return sendError(res, "Order not found.", 404);
 
-    if (order.userId !== req.user.id) {
-      return sendError(res, "Access denied.", 403);
-    }
+    const order = oRows[0];
+    if (order.user_id !== req.user.id) return sendError(res, "Access denied.", 403);
+    if (order.status !== "PENDING") return sendError(res, "Only pending orders can be cancelled.", 400);
 
-    if (order.status !== "PENDING") {
-      return sendError(res, "Only pending orders can be cancelled.", 400);
-    }
+    const { rows } = await query(
+      "UPDATE orders SET status = 'CANCELLED', updated_at = NOW() WHERE id = $1 RETURNING *",
+      [id]
+    );
 
-    const updated = await prisma.order.update({
-      where: { id },
-      data: { status: "CANCELLED" },
-    });
-
-    return sendSuccess(res, { order: updated }, "Order cancelled successfully.");
+    return sendSuccess(res, { order: rows[0] }, "Order cancelled successfully.");
   } catch (err) {
     next(err);
   }

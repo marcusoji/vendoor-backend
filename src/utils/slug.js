@@ -1,22 +1,15 @@
-// src/utils/slug.js — URL-safe slug generator for vendor business names
-
+// src/utils/slug.js
 const slugify = require("slugify");
-const prisma = require("../config/prisma");
+const { query } = require("../db/pool");
 
-/**
- * Generate a unique slug for a vendor based on their business name.
- * Appends a numeric suffix if the base slug already exists.
- * @param {string} businessName
- * @returns {Promise<string>}
- */
 const generateUniqueVendorSlug = async (businessName) => {
   const base = slugify(businessName, { lower: true, strict: true });
   let slug = base;
   let counter = 1;
 
   while (true) {
-    const existing = await prisma.vendor.findUnique({ where: { slug } });
-    if (!existing) return slug;
+    const { rows } = await query("SELECT id FROM vendors WHERE slug = $1", [slug]);
+    if (rows.length === 0) return slug;
     slug = `${base}-${counter}`;
     counter++;
   }

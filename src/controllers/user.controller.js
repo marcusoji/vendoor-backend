@@ -1,30 +1,27 @@
-// src/controllers/user.controller.js — User profile management
-
+// src/controllers/user.controller.js
 const bcrypt = require("bcrypt");
-const prisma = require("../config/prisma");
+const { query } = require("../db/pool");
 const { sendSuccess, sendError } = require("../utils/response");
 
 const SALT_ROUNDS = 12;
 
-/**
- * GET /api/users
- * Admin only — list all users with pagination.
- */
+// GET /api/users — Admin only
 const getAllUsers = async (req, res, next) => {
   try {
-    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const page  = Math.max(1, parseInt(req.query.page)  || 1);
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
-    const skip = (page - 1) * limit;
+    const offset = (page - 1) * limit;
 
-    const [users, total] = await Promise.all([
-      prisma.user.findMany({
-        skip,
-        take: limit,
-        orderBy: { createdAt: "desc" },
-        select: { id: true, fullName: true, email: true, role: true, createdAt: true },
-      }),
-      prisma.user.count(),
-    ]);
+    const { rows: users } = await query(
+      `SELECT id, full_name, email, role, created_at
+         FROM users
+        ORDER BY created_at DESC
+        LIMIT $1 OFFSET $2`,
+      [limit, offset]
+    );
+
+    const { rows: countRows } = await query("SELECT COUNT(*)::int AS total FROM users");
+    const total = countRows[0].total;
 
     return sendSuccess(res, {
       users,
@@ -35,36 +32,28 @@ const getAllUsers = async (req, res, next) => {
   }
 };
 
-/**
- * GET /api/users/:id
- * Admin or self — get a single user profile.
- */
+// GET /api/users/:id — Admin or self
 const getUserById = async (req, res, next) => {
   try {
     const { id } = req.params;
 
-    // Non-admins may only view their own profile
     if (req.user.role !== "ADMIN" && req.user.id !== id) {
       return sendError(res, "Access denied.", 403);
     }
 
-    const user = await prisma.user.findUnique({
-      where: { id },
-      select: { id: true, fullName: true, email: true, role: true, createdAt: true },
-    });
+    const { rows } = await query(
+      "SELECT id, full_name, email, role, created_at FROM users WHERE id = $1",
+      [id]
+    );
+    if (rows.length === 0) return sendError(res, "User not found.", 404);
 
-    if (!user) return sendError(res, "User not found.", 404);
-
-    return sendSuccess(res, { user });
+    return sendSuccess(res, { user: rows[0] });
   } catch (err) {
     next(err);
   }
 };
 
-/**
- * PATCH /api/users/:id
- * Authenticated — update own profile (fullName, email, password).
- */
+// PATCH /api/users/:id — Self or Admin
 const updateUser = async (req, res, next) => {
   try {
     const { id } = req.params;
@@ -74,49 +63,51 @@ const updateUser = async (req, res, next) => {
     }
 
     const { fullName, email, password } = req.body;
-    const updateData = {};
+    const setClauses = [];
+    const values = [];
+    let idx = 1;
 
-    if (fullName) updateData.fullName = fullName;
+    if (fullName) { setClauses.push(`full_name = $${idx++}`); values.push(fullName); }
     if (email) {
-      const existing = await prisma.user.findFirst({
-        where: { email, NOT: { id } },
-      });
-      if (existing) return sendError(res, "Email is already in use.", 409);
-      updateData.email = email;
+      const { rows } = await query(
+        "SELECT id FROM users WHERE email = $1 AND id != $2",
+        [email, id]
+      );
+      if (rows.length > 0) return sendError(res, "Email already in use.", 409);
+      setClauses.push(`email = $${idx++}`); values.push(email);
     }
     if (password) {
-      updateData.password = await bcrypt.hash(password, SALT_ROUNDS);
+      const hashed = await bcrypt.hash(password, SALT_ROUNDS);
+      setClauses.push(`password = $${idx++}`); values.push(hashed);
     }
 
-    if (Object.keys(updateData).length === 0) {
-      return sendError(res, "No valid fields provided for update.", 400);
+    if (setClauses.length === 0) {
+      return sendError(res, "No valid fields provided.", 400);
     }
 
-    const user = await prisma.user.update({
-      where: { id },
-      data: updateData,
-      select: { id: true, fullName: true, email: true, role: true, createdAt: true },
-    });
+    values.push(id);
+    const { rows } = await query(
+      `UPDATE users SET ${setClauses.join(", ")}
+        WHERE id = $${idx}
+        RETURNING id, full_name, email, role, created_at`,
+      values
+    );
 
-    return sendSuccess(res, { user }, "Profile updated successfully.");
+    return sendSuccess(res, { user: rows[0] }, "Profile updated successfully.");
   } catch (err) {
     next(err);
   }
 };
 
-/**
- * DELETE /api/users/:id
- * Admin only — delete a user account.
- */
+// DELETE /api/users/:id — Admin only
 const deleteUser = async (req, res, next) => {
   try {
     const { id } = req.params;
 
-    const user = await prisma.user.findUnique({ where: { id } });
-    if (!user) return sendError(res, "User not found.", 404);
+    const { rows } = await query("SELECT id FROM users WHERE id = $1", [id]);
+    if (rows.length === 0) return sendError(res, "User not found.", 404);
 
-    await prisma.user.delete({ where: { id } });
-
+    await query("DELETE FROM users WHERE id = $1", [id]);
     return sendSuccess(res, null, "User deleted successfully.");
   } catch (err) {
     next(err);
