@@ -12,7 +12,7 @@ const { createVendorSchema, updateVendorSchema } = require("../utils/schemas");
 
 router.get("/",           getAllVendors);
 router.get("/:idOrSlug",  getVendorById);
-router.post("/",          authenticate, validate(createVendorSchema),                          createVendor);
+router.post("/",          validate(createVendorSchema),                          createVendor);
 router.put("/:id",        authenticate, authorize("VENDOR", "ADMIN"), validate(updateVendorSchema), updateVendor);
 router.delete("/:id",     authenticate, authorize("ADMIN"),                                    deleteVendor);
 router.patch("/:id/verify", authenticate, authorize("ADMIN"),                                  verifyVendor);
