@@ -14,6 +14,7 @@ const productRoutes = require("./routes/product.routes");
 const orderRoutes   = require("./routes/order.routes");
 const reviewRoutes  = require("./routes/review.routes");
 const uploadRoutes  = require("./routes/upload.routes");
+const riderRoutes   = require("./routes/rider.routes");
 
 const app = express();
 
@@ -63,7 +64,7 @@ app.use("/api/products", productRoutes);
 app.use("/api/orders",   orderRoutes);
 app.use("/api/reviews",  reviewRoutes);
 app.use("/api/upload",   uploadRoutes);
-
+app.use("/api/riders",   riderRoutes);
 // ── Error handlers (must be last) ─────────────────────────────────────────────
 app.use(notFoundHandler);
 app.use(globalErrorHandler);
