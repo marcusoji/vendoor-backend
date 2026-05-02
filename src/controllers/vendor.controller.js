@@ -86,6 +86,7 @@ const createVendor = async (req, res, next) => {
       state, city, operatingDays, openTime, closeTime, deliveryRadius,
       prepTime, offersPickup, offersScheduled, bizRegNo, bankName, accountName, accountNumber,
     } = req.body;
+    const safeAccountNumber = accountNumber ? String(accountNumber) : null;
 
     const existing = await query("SELECT id FROM vendors WHERE email = $1", [email]);
     if (existing.rows.length > 0) {
@@ -110,7 +111,7 @@ const createVendor = async (req, res, next) => {
         address, phone, email, state, city, operatingDays,
         openTime, closeTime, deliveryRadius, prepTime,
         offersPickup, offersScheduled, bizRegNo || null,
-        bankName || null, accountName || null, accountNumber || null,
+        bankName || null, accountName || null, safeAccountNumber,
       ]
     );
 

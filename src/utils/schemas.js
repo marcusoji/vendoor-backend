@@ -54,8 +54,12 @@ const createVendorSchema = Joi.object({
   bizRegNo: Joi.string().allow("", null).optional(),
   bankName: Joi.string().allow("", null).optional(),
   accountName: Joi.string().allow("", null).optional(),
-  accountNumber: Joi.string().pattern(/^\d{10}$/).allow("", null).optional()
-    .messages({ "string.pattern.base": "Account number must be exactly 10 digits." }),
+ accountNumber: Joi.alternatives().try(
+  Joi.string().pattern(/^\d{10}$/),
+  Joi.number().integer().min(1000000000).max(9999999999)
+).allow("", null).optional().messages({
+  "alternatives.match": "Account number must be exactly 10 digits.",
+}),
 });
 
 const updateVendorSchema = Joi.object({
@@ -78,9 +82,13 @@ const updateVendorSchema = Joi.object({
   bizRegNo: Joi.string().allow("", null),
   bankName: Joi.string().allow("", null),
   accountName: Joi.string().allow("", null),
-  accountNumber: Joi.string().pattern(/^\d{10}$/).allow("", null),
+  accountNumber: Joi.alternatives().try(
+  Joi.string().pattern(/^\d{10}$/),
+  Joi.number().integer().min(1000000000).max(9999999999)
+).allow("", null).messages({
+  "alternatives.match": "Account number must be exactly 10 digits.",
+}),
 }).min(1);
-
 // ─── Product ──────────────────────────────────────────────────────────────────
 
 const createProductSchema = Joi.object({
